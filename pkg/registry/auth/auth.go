@@ -36,9 +36,15 @@ func NewTokenSource(
 	registryURL string,
 	secretsProvider secrets.Provider,
 	interactive bool,
+	configProviders ...config.Provider,
 ) (TokenSource, error) {
 	if cfg == nil {
 		return nil, nil
+	}
+
+	configProvider := config.NewProvider()
+	if len(configProviders) > 0 && configProviders[0] != nil {
+		configProvider = configProviders[0]
 	}
 
 	return tokensource.New(tokensource.Options{
@@ -57,8 +63,10 @@ func NewTokenSource(
 			}
 			return DeriveSecretKey(registryURL, cfg.Issuer)
 		},
-		ConfigPersister: updateRegistryTokenRef,
-		FallbackErr:     ErrRegistryAuthRequired,
+		ConfigPersister: func(key string, expiry time.Time) {
+			updateRegistryTokenRef(configProvider, key, expiry)
+		},
+		FallbackErr: ErrRegistryAuthRequired,
 	}), nil
 }
 
@@ -70,9 +78,9 @@ func DeriveSecretKey(registryURL, issuer string) string {
 }
 
 // updateRegistryTokenRef persists the refresh token key and expiry into the
-// global config under RegistryAuth.OAuth.
-func updateRegistryTokenRef(key string, expiry time.Time) {
-	if err := config.UpdateConfig(func(c *config.Config) error {
+// injected config provider under RegistryAuth.OAuth.
+func updateRegistryTokenRef(configProvider config.Provider, key string, expiry time.Time) {
+	if err := configProvider.UpdateConfig(func(c *config.Config) error {
 		if c.RegistryAuth.OAuth != nil {
 			c.RegistryAuth.OAuth.CachedRefreshTokenRef = key
 			c.RegistryAuth.OAuth.CachedTokenExpiry = expiry

@@ -51,6 +51,12 @@ func WithInteractive(interactive bool) ProviderOption {
 // NewRegistryProvider creates a new registry provider based on the configuration.
 // Returns an error if a custom registry is configured but cannot be reached.
 func NewRegistryProvider(cfg *config.Config, opts ...ProviderOption) (Provider, error) {
+	return newRegistryProvider(cfg, config.NewProvider(), opts...)
+}
+
+// newRegistryProvider is NewRegistryProvider with an injectable config provider,
+// so registry auth persistence follows the caller's config path.
+func newRegistryProvider(cfg *config.Config, configProvider config.Provider, opts ...ProviderOption) (Provider, error) {
 	options := &providerOptions{interactive: true}
 	for _, opt := range opts {
 		opt(options)
@@ -65,7 +71,7 @@ func NewRegistryProvider(cfg *config.Config, opts ...ProviderOption) (Provider, 
 	// Create token source if registry auth is configured.
 	// Auth only applies to API registry providers; remote URL and local file
 	// providers do not support authentication.
-	tokenSource := resolveTokenSource(cfg, options.interactive)
+	tokenSource := resolveTokenSource(cfg, configProvider, options.interactive)
 
 	if cfg != nil && len(cfg.RegistryApiUrl) > 0 {
 		provider, err := NewCachedAPIRegistryProvider(cfg.RegistryApiUrl, cfg.AllowPrivateRegistryIp, true, tokenSource)
@@ -115,7 +121,7 @@ func GetDefaultProviderWithConfig(configProvider config.Provider, opts ...Provid
 			s.err = err
 			return
 		}
-		s.provider, s.err = NewRegistryProvider(cfg, opts...)
+		s.provider, s.err = newRegistryProvider(cfg, configProvider, opts...)
 	})
 	return s.provider, s.err
 }
@@ -131,7 +137,7 @@ func ResetDefaultProvider() {
 
 // resolveTokenSource creates a TokenSource from the config if registry auth is configured.
 // Returns nil if no auth is configured or if token source creation fails (logs warning).
-func resolveTokenSource(cfg *config.Config, interactive bool) auth.TokenSource {
+func resolveTokenSource(cfg *config.Config, configProvider config.Provider, interactive bool) auth.TokenSource {
 	if cfg == nil || cfg.RegistryAuth.Type != config.RegistryAuthTypeOAuth || cfg.RegistryAuth.OAuth == nil {
 		return nil
 	}
@@ -153,7 +159,7 @@ func resolveTokenSource(cfg *config.Config, interactive bool) auth.TokenSource {
 		}
 	}
 
-	tokenSource, err := auth.NewTokenSource(cfg.RegistryAuth.OAuth, cfg.RegistryApiUrl, secretsProvider, interactive)
+	tokenSource, err := auth.NewTokenSource(cfg.RegistryAuth.OAuth, cfg.RegistryApiUrl, secretsProvider, interactive, configProvider)
 	if err != nil {
 		slog.Warn("Failed to create registry auth token source", "error", err)
 		return nil

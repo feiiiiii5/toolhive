@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -349,4 +350,56 @@ func TestToken_RefreshTokenCache_RotatedTokenPersisted(t *testing.T) {
 	}
 	assert.True(t, persistedRT,
 		"rotated refresh token must be re-persisted via PersistingTokenSource; SetSecret calls: %v", setSecretCalls)
+}
+
+// PersistingTokenSource must write the rotated token reference through the
+// injected config provider, not the process-global config path. Custom config
+// paths (tests, deployments using config.NewPathProvider) would otherwise be
+// ignored and the reference would land in the default config file.
+func TestToken_ConfigPersisterUsesInjectedProvider(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	provider := config.NewPathProvider(configPath)
+	require.NoError(t, provider.UpdateConfig(func(c *config.Config) error {
+		c.RegistryAuth.Type = config.RegistryAuthTypeOAuth
+		c.RegistryAuth.OAuth = &config.RegistryOAuthConfig{
+			Issuer:   "https://auth.example.com",
+			ClientID: "client",
+		}
+		return nil
+	}))
+
+	srv := newTokenServer(t, "new-access-token", "rotated-refresh-token")
+
+	ctrl := gomock.NewController(t)
+	t.Cleanup(ctrl.Finish)
+	mock := secretsmocks.NewMockProvider(ctrl)
+	mock.EXPECT().
+		GetSecret(gomock.Any(), gomock.AssignableToTypeOf("")).
+		DoAndReturn(func(_ context.Context, key string) (string, error) {
+			if strings.HasSuffix(key, "_AT") {
+				return "", errors.New("not found")
+			}
+			return "old-refresh-token", nil
+		}).AnyTimes()
+	mock.EXPECT().
+		SetSecret(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(nil).AnyTimes()
+
+	src, err := NewTokenSource(
+		&config.RegistryOAuthConfig{Issuer: srv.URL, ClientID: "c"},
+		"https://registry.example.com", mock, false, provider,
+	)
+	require.NoError(t, err)
+
+	tok, tokErr := src.Token(context.Background())
+	require.NoError(t, tokErr)
+	assert.Equal(t, "new-access-token", tok)
+
+	persisted, err := provider.LoadOrCreateConfig()
+	require.NoError(t, err)
+	require.NotNil(t, persisted.RegistryAuth.OAuth)
+	assert.NotEmpty(t, persisted.RegistryAuth.OAuth.CachedRefreshTokenRef,
+		"rotated token reference must be persisted through the injected config provider")
 }
